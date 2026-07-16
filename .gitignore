@@ -10,6 +10,9 @@ calibration_frame.png
 calibration_crop.png
 pink_mask.png
 
+# Per-cycle debug screencaps (auto-pruned after DEBUG_KEEP_HOURS)
+debug_caps/
+
 # Env / tooling
 .venv/
 .idea/

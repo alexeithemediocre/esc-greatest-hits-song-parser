@@ -134,6 +134,16 @@ OCR_LANG = "script/Latin"
 # Higher = less sensitive to noise. 5 is a good starting point.
 HASH_THRESHOLD = 5
 
+# Debug screencaps: for EVERY grab, save the same set of images --calibrate
+# produces (full frame, OCR crop, pink mask) into DEBUG_DIR with a timestamp
+# prefix, so a bad read can be diagnosed after the fact. Caps older than
+# DEBUG_KEEP_HOURS are deleted automatically each cycle. At the default 60s
+# interval that's ~1440 sets/day; the full frames dominate the disk cost
+# (roughly 1-2 MB each at 720p), so turn this off if space is tight.
+DEBUG_SAVE_CAPS = True
+DEBUG_DIR = "debug_caps"
+DEBUG_KEEP_HOURS = 24
+
 # -------------------------------------------------------------------------------
 
 
@@ -261,6 +271,43 @@ def crop_box(img: Image.Image) -> Image.Image:
     return img.crop((x0, y0, x1, y1))
 
 
+def prune_debug_caps() -> None:
+    """Delete debug screencaps older than DEBUG_KEEP_HOURS."""
+    cutoff = time.time() - DEBUG_KEEP_HOURS * 3600
+    try:
+        names = os.listdir(DEBUG_DIR)
+    except FileNotFoundError:
+        return
+    for name in names:
+        if not name.endswith(".png"):
+            continue
+        path = os.path.join(DEBUG_DIR, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass  # vanished mid-loop or busy; it'll be retried next cycle
+
+
+def save_debug_caps(img: Image.Image, crop: Image.Image) -> None:
+    """Store this cycle's screencaps (frame / crop / pink mask -- the same set
+    --calibrate produces) under DEBUG_DIR, then prune anything past retention.
+    A failure here only warns; it never breaks the logging loop."""
+    try:
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        img.save(os.path.join(DEBUG_DIR, f"{stamp}_frame.png"))
+        crop.save(os.path.join(DEBUG_DIR, f"{stamp}_crop.png"))
+        x0, y0, x1, y1 = _search_region(img)
+        region = np.asarray(img.crop((x0, y0, x1, y1)).convert("RGB"))
+        mask = _pink_mask(region)
+        Image.fromarray((mask * 255).astype("uint8")).save(
+            os.path.join(DEBUG_DIR, f"{stamp}_mask.png"))
+        prune_debug_caps()
+    except Exception as e:
+        print(f"  [warn] couldn't save debug screencaps: {e}")
+
+
 def ocr(crop: Image.Image) -> str:
     """Read text from the crop. Upscales + grayscales first for cleaner results."""
     big = crop.resize((crop.width * 4, crop.height * 4), Image.LANCZOS)
@@ -350,6 +397,8 @@ def run() -> None:
 
         if img is not None:
             crop = crop_box(img)
+            if DEBUG_SAVE_CAPS:
+                save_debug_caps(img, crop)
             h = imagehash.phash(crop)
 
             stamp = datetime.now().strftime("%H:%M:%S")
@@ -400,7 +449,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-# TODO temporarily store screencaps, for debug purposes. keep them for 24 hours only
