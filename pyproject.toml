@@ -1,0 +1,11 @@
+[project]
+name = "esc-greatest-hits-song-parser"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "imagehash>=4.3.2",
+    "numpy>=2.4.6",
+    "pillow>=12.3.0",
+    "pytesseract>=0.3.13",
+    "yt-dlp[default]>=2026.7.12.233956.dev0",
+]

@@ -1,0 +1,25 @@
+services:
+  logger:
+    build: .
+    image: esc-greatest-hits-song-parser
+    container_name: esc-logger
+    restart: unless-stopped
+    # Reap ffmpeg/yt-dlp zombies; SIGINT so `docker compose stop` exits the
+    # loop the same way Ctrl-C does.
+    init: true
+    stop_signal: SIGINT
+    volumes:
+      # The container's working dir. songs.csv and the --calibrate PNGs land
+      # here on the host, and this is where the script expects ./cookies.txt --
+      # put the exported YouTube cookies at ./data/cookies.txt. Mounted
+      # read-write on purpose: yt-dlp writes rotated cookies back, which keeps
+      # the session alive longer.
+      - ./data:/data
+    environment:
+      # Timestamps in songs.csv use this zone; default is UTC.
+      TZ: ${TZ:-Etc/UTC}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
