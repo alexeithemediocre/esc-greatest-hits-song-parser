@@ -131,6 +131,8 @@ YTDLP_EXTRA_ARGS = [
   behavior tweaks.
 - `--calibrate` is the main manual test — use it to verify the full chain
   (resolve → frame grab → crop → OCR) end to end after any environment change.
+- **No commits or PRs unless explicitly asked.** Leave changes uncommitted in
+  the working tree; the user reviews and commits/pushes themselves.
 
 ## Roadmap / ideas
 
