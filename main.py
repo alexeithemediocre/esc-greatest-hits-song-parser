@@ -244,10 +244,16 @@ def find_pink_box(img: Image.Image):
     # A column/row counts as "box" only if a real chunk of it is pink -- this
     # ignores thin noise and anti-aliased edges.
     cols = _longest_run(mask.sum(axis=0) >= max(3, int(0.20 * h)))
-    rows = _longest_run(mask.sum(axis=1) >= max(3, int(0.20 * w)))
-    if not cols or not rows:
+    if not cols:
         return None
     c0, c1 = cols
+    # Rows are measured against the BOX width, not the search band: the band is
+    # ~3x wider than the box, so 20% of the band is ~60% of the box -- rows
+    # through dense text hover right at that line and an unlucky frame dips
+    # below it, splitting the run and shaving the crop mid-glyph.
+    rows = _longest_run(mask[:, c0:c1 + 1].sum(axis=1) >= max(3, int(0.20 * (c1 + 1 - c0))))
+    if not rows:
+        return None
     r0, r1 = rows
     # Hug the pink box tightly on all sides; padding into the background creates
     # phantom "|" characters, so we never include any. c1/r1 are inclusive last
