@@ -15,9 +15,11 @@ services:
       # read-write on purpose: yt-dlp writes rotated cookies back, which keeps
       # the session alive longer.
       - ./data:/data
-    environment:
-      # Timestamps in songs.csv use this zone; default is UTC.
-      TZ: ${TZ:-Etc/UTC}
+    # The whole .env is forwarded into the container verbatim -- no per-variable list
+    # to keep in sync here. Values are injected at container CREATE time: after editing .env,
+    # apply with `docker compose up -d` (recreates the container; no rebuild).
+    env_file:
+      - path: .env
     logging:
       driver: json-file
       options:

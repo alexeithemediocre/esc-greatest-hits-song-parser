@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-eurovision_logger.py
-====================
+main.py
+=======
 Watches the "Eurovision Song Contest: Non-Stop Hits!" YouTube stream, reads the
 song name from the pink overlay box in the bottom-left corner once a minute, and
 logs each new song to a CSV file.
@@ -37,13 +37,13 @@ Python packages:
 Usage
 -----
 FIRST, calibrate the crop box for YOUR stream resolution:
-    python eurovision_logger.py --calibrate
+    python main.py --calibrate
 This saves 'calibration_frame.png' (the full frame) and 'calibration_crop.png'
 (what the OCR will see). Open both, and if the crop doesn't tightly frame the
 pink text box, adjust CROP_FRAC below and re-run --calibrate until it does.
 
 THEN run it for real:
-    python eurovision_logger.py
+    python main.py
 Leave it running in a terminal. Ctrl-C to stop. Songs land in songs.csv.
 """
 
@@ -57,10 +57,13 @@ import sys
 import time
 from datetime import datetime
 
-from PIL import Image, ImageOps
-import pytesseract
 import imagehash
 import numpy as np
+import pytesseract
+from PIL import Image, ImageOps
+
+from core.settings import settings
+from services.telegram_service import TelegramService
 
 # ------------------------- CONFIG (edit these) ---------------------------------
 
@@ -90,9 +93,9 @@ AUTO_TIGHTEN_TO_PINK = True
 # misbehaves on your stream, run --calibrate: it saves pink_mask.png so you can
 # see exactly what's matched, then nudge these. PINK_H is the (min, max) hue band.
 PINK_H = (190, 245)
-PINK_S_MIN = 110        # saturation floor -- excludes the white text (near 0 sat)
-PINK_V_MIN = 70         # brightness floor
-PINK_MIN_PIXELS = 300   # if fewer pink pixels than this, assume no box -> fallback
+PINK_S_MIN = 110  # saturation floor -- excludes the white text (near 0 sat)
+PINK_V_MIN = 70  # brightness floor
+PINK_MIN_PIXELS = 300  # if fewer pink pixels than this, assume no box -> fallback
 # The crop hugs the detected pink box tightly on ALL sides -- it never pads into
 # the video behind it. A pink<->background edge is exactly what makes OCR
 # hallucinate a stray "|", so we never include one; the box's own internal margin
@@ -115,7 +118,12 @@ STREAM_QUALITY = "best[height<=?1080]"
 #   YTDLP_EXTRA_ARGS = ["--cookies-from-browser", "firefox",
 #                       "--extractor-args", "youtube:player_client=web_safari,default"]
 # Also make sure yt-dlp itself is up to date:  pip install -U --pre "yt-dlp[default]"
-YTDLP_EXTRA_ARGS = ["--cookies", "./cookies.txt", "--extractor-args", "youtube:player-client=default,web_embedded"]
+YTDLP_EXTRA_ARGS = [
+    "--cookies",
+    "./cookies.txt",
+    "--extractor-args",
+    "youtube:player-client=default,web_embedded",
+]
 # YTDLP_EXTRA_ARGS = []
 
 # How the script invokes yt-dlp. By default it uses the SAME Python that runs
@@ -144,6 +152,11 @@ DEBUG_SAVE_CAPS = True
 DEBUG_DIR = "debug_caps"
 DEBUG_KEEP_HOURS = 24
 
+# Telegram posting is configured via env vars / a .env file, NOT here -- the
+# bot token is a secret (same rule as cookies.txt). Knobs and defaults live in
+# core/settings.py, the keys are documented in .env.sample, and the manual
+# end-to-end test is:  python main.py --test-telegram
+
 # -------------------------------------------------------------------------------
 
 
@@ -152,37 +165,66 @@ def grab_frame(url: str) -> Image.Image | None:
     try:
         # Resolve the direct media URL (re-resolved each call so expiring live
         # URLs are never a problem).
-        ytdlp_args = [*YTDLP_CMD, *YTDLP_EXTRA_ARGS, "-g", "-v", "-f", STREAM_QUALITY, url]
+        ytdlp_args = [
+            *YTDLP_CMD,
+            *YTDLP_EXTRA_ARGS,
+            "-g",
+            "-v",
+            "-f",
+            STREAM_QUALITY,
+            url,
+        ]
 
         # print("running yt-dlp: ", " ".join(ytdlp_args))
 
         direct = subprocess.run(
             ytdlp_args,
-            capture_output=True, text=True, timeout=60,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
 
         if direct.returncode != 0 or not direct.stdout.strip():
-            print(f"  [warn] yt-dlp couldn't resolve the stream:\n"
-                  f"         {direct.stderr.strip().splitlines()[-1] if direct.stderr.strip() else '(no output)'}")
+            print(
+                f"  [warn] yt-dlp couldn't resolve the stream:\n"
+                f"         {direct.stderr.strip().splitlines()[-1] if direct.stderr.strip() else '(no output)'}"
+            )
             return None
         media_url = direct.stdout.strip().splitlines()[-1]
 
         # Grab the frame nearest the live edge as a PNG on stdout.
         frame = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error",
-             "-i", media_url, "-frames:v", "1", "-f", "image2pipe",
-             "-vcodec", "png", "pipe:1"],
-            capture_output=True, timeout=90,
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                media_url,
+                "-frames:v",
+                "1",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "png",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=90,
         )
         if frame.returncode != 0 or not frame.stdout:
-            print(f"  [warn] ffmpeg couldn't grab a frame:\n"
-                  f"         {frame.stderr.decode(errors='replace').strip()[:300]}")
+            print(
+                f"  [warn] ffmpeg couldn't grab a frame:\n"
+                f"         {frame.stderr.decode(errors='replace').strip()[:300]}"
+            )
             return None
         return Image.open(io.BytesIO(frame.stdout)).convert("RGB")
 
     except FileNotFoundError as e:
-        sys.exit(f"[fatal] Missing tool: {e.filename}. Install yt-dlp and ffmpeg "
-                 f"(see the header of this script).")
+        sys.exit(
+            f"[fatal] Missing tool: {e.filename}. Install yt-dlp and ffmpeg "
+            f"(see the header of this script)."
+        )
     except subprocess.TimeoutExpired:
         print("  [warn] Timed out fetching a frame; will retry next cycle.")
         return None
@@ -193,7 +235,9 @@ def check_yt_dlp() -> None:
     (e.g. PyCharm's interpreter vs. your terminal) are obvious. Exits with a
     clear install command if yt-dlp isn't present in THIS environment."""
     try:
-        r = subprocess.run([*YTDLP_CMD, "--version"], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(
+            [*YTDLP_CMD, "--version"], capture_output=True, text=True, timeout=30
+        )
         if r.returncode == 0:
             print(f"Using yt-dlp {r.stdout.strip()}  (via {' '.join(YTDLP_CMD)})")
             return
@@ -210,8 +254,8 @@ def check_yt_dlp() -> None:
 def _search_region(img: Image.Image):
     """Return (x0, y0, x1, y1) pixel bounds of the CROP_FRAC search band."""
     w, h = img.size
-    l, t, r, b = CROP_FRAC
-    return int(l * w), int(t * h), int(r * w), int(b * h)
+    left, top, right, bottom = CROP_FRAC
+    return int(left * w), int(top * h), int(right * w), int(bottom * h)
 
 
 def _pink_mask(rgb: np.ndarray) -> np.ndarray:
@@ -251,7 +295,9 @@ def find_pink_box(img: Image.Image):
     # ~3x wider than the box, so 20% of the band is ~60% of the box -- rows
     # through dense text hover right at that line and an unlucky frame dips
     # below it, splitting the run and shaving the crop mid-glyph.
-    rows = _longest_run(mask[:, c0:c1 + 1].sum(axis=1) >= max(3, int(0.20 * (c1 + 1 - c0))))
+    rows = _longest_run(
+        mask[:, c0 : c1 + 1].sum(axis=1) >= max(3, int(0.20 * (c1 + 1 - c0)))
+    )
     if not rows:
         return None
     r0, r1 = rows
@@ -308,7 +354,8 @@ def save_debug_caps(img: Image.Image, crop: Image.Image) -> None:
         region = np.asarray(img.crop((x0, y0, x1, y1)).convert("RGB"))
         mask = _pink_mask(region)
         Image.fromarray((mask * 255).astype("uint8")).save(
-            os.path.join(DEBUG_DIR, f"{stamp}_mask.png"))
+            os.path.join(DEBUG_DIR, f"{stamp}_mask.png")
+        )
         prune_debug_caps()
     except Exception as e:
         print(f"  [warn] couldn't save debug screencaps: {e}")
@@ -353,11 +400,19 @@ def append_csv(path: str, rec: dict) -> None:
     with open(path, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         if new_file:
-            writer.writerow(["timestamp", "artist", "song", "country", "year", "raw_text"])
-        writer.writerow([
-            datetime.now().isoformat(timespec="seconds"),
-            rec["artist"], rec["song"], rec["country"], rec["year"], rec["raw"],
-        ])
+            writer.writerow(
+                ["timestamp", "artist", "song", "country", "year", "raw_text"]
+            )
+        writer.writerow(
+            [
+                datetime.now().isoformat(timespec="seconds"),
+                rec["artist"],
+                rec["song"],
+                rec["country"],
+                rec["year"],
+                rec["raw"],
+            ]
+        )
 
 
 def calibrate() -> None:
@@ -379,10 +434,14 @@ def calibrate() -> None:
     text = ocr(crop)
 
     tightened = AUTO_TIGHTEN_TO_PINK and find_pink_box(img) is not None
-    print(f"Saved calibration_frame.png ({img.size[0]}x{img.size[1]}), "
-          f"calibration_crop.png ({crop.size[0]}x{crop.size[1]}), and pink_mask.png")
-    print(f"Pink pixels in search band: {int(mask.sum())}  |  "
-          f"auto-tighten: {'HIT the box' if tightened else 'fell back to CROP_FRAC rectangle'}")
+    print(
+        f"Saved calibration_frame.png ({img.size[0]}x{img.size[1]}), "
+        f"calibration_crop.png ({crop.size[0]}x{crop.size[1]}), and pink_mask.png"
+    )
+    print(
+        f"Pink pixels in search band: {int(mask.sum())}  |  "
+        f"auto-tighten: {'HIT the box' if tightened else 'fell back to CROP_FRAC rectangle'}"
+    )
     print(f"OCR currently reads: {text!r}")
     print("\nCheck the saved PNGs:")
     print("  - pink_mask.png should show the box as a solid white blob and little")
@@ -393,7 +452,16 @@ def calibrate() -> None:
 
 def run() -> None:
     check_yt_dlp()
-    print(f"Watching stream every {INTERVAL}s. Logging new songs to {OUTPUT_CSV}. Ctrl-C to stop.\n")
+    tg_service = TelegramService()
+    posting = (
+        f"posting to {settings.telegram.chat_id}"
+        if tg_service.is_initialized()
+        else "Telegram posting off"
+    )
+    print(
+        f"Watching stream every {INTERVAL}s. Logging new songs to {OUTPUT_CSV} "
+        f"({posting}). Ctrl-C to stop.\n"
+    )
     last_hash = None
     last_song = None  # (artist, song) of the last logged entry, for dedup
 
@@ -422,7 +490,15 @@ def run() -> None:
                         last_song = key
                         append_csv(OUTPUT_CSV, rec)
 
-                        print(f"[{stamp}] + {rec['raw']}")
+                        # Telegram is best-effort AFTER the CSV append: a failed
+                        # post is a [warn] + "post failed" tag, never a crash.
+                        posted = ""
+
+                        if tg_service.is_initialized():
+                            ok = tg_service.send_message_to_channel(rec)
+                            posted = " → posted" if ok else " → post failed"
+
+                        print(f"[{stamp}] + {rec['raw']}{posted}")
                     else:
                         print(f"[{stamp}] duplicate?: {rec['raw']}")
 
@@ -430,7 +506,9 @@ def run() -> None:
                     print(f"[{stamp}] invalid: {rec['raw']}")
 
             else:
-                print(f"[{stamp}] unchanged. previous hash: {last_hash}, current hash: {h}")
+                print(
+                    f"[{stamp}] unchanged. previous hash: {last_hash}, current hash: {h}"
+                )
 
         # Sleep out the remainder of the interval (accounting for time spent).
         elapsed = time.time() - cycle_start
@@ -438,13 +516,29 @@ def run() -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Log songs from the Eurovision Non-Stop Hits stream.")
-    ap.add_argument("--calibrate", action="store_true",
-                    help="Grab one frame + crop so you can tune CROP_FRAC, then exit.")
+    ap = argparse.ArgumentParser(
+        description="Log songs from the Eurovision Non-Stop Hits stream."
+    )
+    ap.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="Grab one frame + crop so you can tune CROP_FRAC, then exit.",
+    )
+    ap.add_argument(
+        "--test-telegram",
+        action="store_true",
+        help="Send one sample post to the configured Telegram channel, print the API response, then exit.",
+    )
     args = ap.parse_args()
 
     if args.calibrate:
         calibrate()
+
+        return
+
+    if args.test_telegram:
+        TelegramService().test_telegram()
+
         return
 
     try:

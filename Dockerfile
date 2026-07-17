@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # System tools the script shells out to / needs:
 #   ffmpeg     - grabs one frame from the resolved stream URL
@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
 
 # uv, pinned to the same minor version used for uv.lock locally.
-COPY --from=ghcr.io/astral-sh/uv:0.6 /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /usr/local/bin/
 
 # Install locked dependencies first so this layer caches across code edits.
 WORKDIR /app
@@ -35,7 +35,13 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
+# NOTE: .env is deliberately NOT copied -- secrets never go into image layers.
+# docker compose loads .env at runtime and passes the values via environment:.
 COPY main.py ./
+COPY adapters/ ./adapters/
+COPY core/ ./core/
+COPY fixtures/ ./fixtures/
+COPY services/ ./services/
 
 # Venv python first on PATH -> sys.executable -m yt_dlp uses the locked yt-dlp.
 ENV PATH="/app/.venv/bin:$PATH" \

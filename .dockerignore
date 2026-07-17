@@ -1,5 +1,6 @@
-# Only pyproject.toml, uv.lock and main.py are COPY'd, but keep the build
-# context small and make sure secrets/output can never leak into the image.
+# Only pyproject.toml, uv.lock, main.py and the adapters/core/fixtures/
+# services packages are COPY'd, but keep the build context small and make
+# sure secrets/output can never leak into the image.
 .git
 .idea
 .venv
@@ -10,3 +11,5 @@ songs.csv
 CLAUDE.md
 Dockerfile
 docker-compose.yml
+.env
+__pycache__/
