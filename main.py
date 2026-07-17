@@ -4,7 +4,7 @@ main.py
 =======
 Watches the "Eurovision Song Contest: Non-Stop Hits!" YouTube stream, reads the
 song name from the pink overlay box in the bottom-left corner once a minute, and
-logs each new song to a CSV file.
+logs each new song to an SQLite database.
 
 How it works
 ------------
@@ -15,8 +15,8 @@ How it works
    perceptual hash. If nothing changed, it does nothing (the same song is still
    playing) -- this avoids re-reading the same song over and over.
 3. When the box changes, it runs OCR (tesseract) on the crop, parses the text
-   into artist / song / country / year, and -- if it's a new song -- appends a
-   row to the CSV with a timestamp.
+   into artist / song / country / year, and -- if it's a new song -- inserts a
+   row into the database with a timestamp.
 
 The OCR + crop + parse pipeline was validated against a real screenshot of the
 stream and read "Amir - Jai Cherché - France 2016" perfectly.
@@ -44,11 +44,10 @@ pink text box, adjust CROP_FRAC below and re-run --calibrate until it does.
 
 THEN run it for real:
     python main.py
-Leave it running in a terminal. Ctrl-C to stop. Songs land in songs.csv.
+Leave it running in a terminal. Ctrl-C to stop. Songs land in songs.db.
 """
 
 import argparse
-import csv
 import io
 import os
 import re
@@ -63,6 +62,7 @@ import pytesseract
 from PIL import Image, ImageOps
 
 from core.settings import settings
+from services.sqlite_service import SqliteService
 from services.telegram_service import TelegramService
 
 # ------------------------- CONFIG (edit these) ---------------------------------
@@ -72,9 +72,6 @@ VIDEO_URL = "https://www.youtube.com/watch?v=jP-WZ0w3u70"
 
 # How often to check, in seconds. 60 = once a minute (as you described).
 INTERVAL = 60
-
-# Where to save results.
-OUTPUT_CSV = "songs.csv"
 
 # Where to look for the overlay, as fractions of the frame (left, top, right,
 # bottom). With AUTO_TIGHTEN_TO_PINK on (below), this is just a generous SEARCH
@@ -152,10 +149,12 @@ DEBUG_SAVE_CAPS = True
 DEBUG_DIR = "debug_caps"
 DEBUG_KEEP_HOURS = 24
 
-# Telegram posting is configured via env vars / a .env file, NOT here -- the
-# bot token is a secret (same rule as cookies.txt). Knobs and defaults live in
-# core/settings.py, the keys are documented in .env.sample, and the manual
-# end-to-end test is:  python main.py --test-telegram
+# Telegram posting and the SQLite db path are configured via env vars / a
+# .env file, NOT here -- the bot token is a secret (same rule as cookies.txt),
+# and the db path differs per deployment. Knobs and defaults live in
+# core/settings.py (TELEGRAM__*, SQLITE__DB_PATH), the keys are documented in
+# .env.sample, and the manual end-to-end test for the posting chain is:
+#   python main.py --test-telegram
 
 # -------------------------------------------------------------------------------
 
@@ -395,26 +394,6 @@ def looks_valid(rec: dict) -> bool:
     return bool(rec["artist"] and rec["song"])
 
 
-def append_csv(path: str, rec: dict) -> None:
-    new_file = not os.path.exists(path)
-    with open(path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if new_file:
-            writer.writerow(
-                ["timestamp", "artist", "song", "country", "year", "raw_text"]
-            )
-        writer.writerow(
-            [
-                datetime.now().isoformat(timespec="seconds"),
-                rec["artist"],
-                rec["song"],
-                rec["country"],
-                rec["year"],
-                rec["raw"],
-            ]
-        )
-
-
 def calibrate() -> None:
     check_yt_dlp()
     print("Grabbing one frame to calibrate the crop box...")
@@ -452,6 +431,8 @@ def calibrate() -> None:
 
 def run() -> None:
     check_yt_dlp()
+    db_service = SqliteService()
+    db_service.provision_table()
     tg_service = TelegramService()
     posting = (
         f"posting to {settings.telegram.chat_id}"
@@ -459,8 +440,8 @@ def run() -> None:
         else "Telegram posting off"
     )
     print(
-        f"Watching stream every {INTERVAL}s. Logging new songs to {OUTPUT_CSV} "
-        f"({posting}). Ctrl-C to stop.\n"
+        f"Watching stream every {INTERVAL}s. Logging new songs to "
+        f"{settings.sqlite.db_path} ({posting}). Ctrl-C to stop.\n"
     )
     last_hash = None
     last_song = None  # (artist, song) of the last logged entry, for dedup
@@ -488,14 +469,25 @@ def run() -> None:
 
                     if key != last_song:
                         last_song = key
-                        append_csv(OUTPUT_CSV, rec)
+                        # "Noticed X times before" -- queried BEFORE the insert
+                        # so the count/last-seen describe previous plays, not
+                        # the row we're about to add. Country+year is the
+                        # lookup key, so reads without one skip the stats line.
+                        occurrences = (
+                            db_service.get_entry_occurrences_in_db(
+                                rec["country"], rec["year"]
+                            )
+                            if rec["country"] and rec["year"]
+                            else None
+                        )
+                        db_service.add_entry_to_db(rec)
 
-                        # Telegram is best-effort AFTER the CSV append: a failed
+                        # Telegram is best-effort AFTER the DB insert: a failed
                         # post is a [warn] + "post failed" tag, never a crash.
                         posted = ""
 
                         if tg_service.is_initialized():
-                            ok = tg_service.send_message_to_channel(rec)
+                            ok = tg_service.send_message_to_channel(rec, occurrences)
                             posted = " → posted" if ok else " → post failed"
 
                         print(f"[{stamp}] + {rec['raw']}{posted}")

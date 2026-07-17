@@ -15,8 +15,8 @@ import urllib.request
 
 class TelegramClient:
     """Best-effort poster: every failure is a printed "[warn] telegram: ..."
-    and a None return, never an exception. By the time we post, the CSV append
-    has already happened -- songs.csv is the source of truth and Telegram must
+    and a None return, never an exception. By the time we post, the DB insert
+    has already happened -- songs.db is the source of truth and Telegram must
     never break the logging loop."""
 
     def __init__(
@@ -37,11 +37,13 @@ class TelegramClient:
                 "disable_notification": self.silent,
             }
         ).encode("utf-8")
+
         req = urllib.request.Request(
             self._api_url,
             data=payload,
             headers={"Content-Type": "application/json"},
         )
+
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 body = json.load(resp)
@@ -51,9 +53,11 @@ class TelegramClient:
         except Exception as e:
             print(f"  [warn] telegram: {e}")
             return None
+
         if not body.get("ok"):
             print(f"  [warn] telegram: {body.get('description', body)}")
             return None
+
         return body
 
     @staticmethod

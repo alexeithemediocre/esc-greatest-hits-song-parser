@@ -9,7 +9,7 @@ services:
     init: true
     stop_signal: SIGINT
     volumes:
-      # The container's working dir. songs.csv and the --calibrate PNGs land
+      # The container's working dir. songs.db and the --calibrate PNGs land
       # here on the host, and this is where the script expects ./cookies.txt --
       # put the exported YouTube cookies at ./data/cookies.txt. Mounted
       # read-write on purpose: yt-dlp writes rotated cookies back, which keeps

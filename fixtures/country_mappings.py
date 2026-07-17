@@ -11,25 +11,6 @@ emoji flag (Yugoslavia, Serbia & Montenegro), all fall back to the EU flag.
 
 import re
 
-
-def _flag(iso2: str) -> str:
-    """ISO alpha-2 code -> flag emoji via regional-indicator codepoints."""
-    return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in iso2.upper())
-
-
-FALLBACK_FLAG = _flag("EU")  # "EU" regional indicators render as the EU flag
-
-
-def normalize_country(name: str) -> str:
-    """Casefold, drop dots ("F.Y.R." -> "FYR"), unify "&" -> "and", collapse
-    whitespace, strip a leading "the" -- so OCR/display variants of the same
-    country hit one dict key."""
-    s = name.casefold().replace("&", " and ").replace(".", "")
-    s = re.sub(r"\s+", " ", s).strip()
-
-    return s.removeprefix("the ")
-
-
 COUNTRY_FLAGS = {
     "albania": "AL",
     "andorra": "AD",
@@ -111,6 +92,24 @@ S_AND_M_YEARS = (
     "2004",
     "2005",
 )
+
+
+def _flag(iso2: str) -> str:
+    """ISO alpha-2 code -> flag emoji via regional-indicator codepoints."""
+    return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in iso2.upper())
+
+
+FALLBACK_FLAG = _flag("EU")  # "EU" regional indicators render as the EU flag
+
+
+def normalize_country(name: str) -> str:
+    """Casefold, drop dots ("F.Y.R." -> "FYR"), unify "&" -> "and", collapse
+    whitespace, strip a leading "the" -- so OCR/display variants of the same
+    country hit one dict key."""
+    s = name.casefold().replace("&", " and ").replace(".", "")
+    s = re.sub(r"\s+", " ", s).strip()
+
+    return s.removeprefix("the ")
 
 
 def flag_for(country: str | None, year: str | None) -> str:

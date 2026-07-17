@@ -20,6 +20,13 @@ class TelegramSettings(BaseSettings):
     silent: bool = True
 
 
+class SqliteSettings(BaseSettings):
+    # Where songs land (the file is created on first run). A relative path
+    # resolves against the working directory: repo root locally, /data
+    # (= host ./data/) under Docker.
+    db_path: str = "songs.db"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -30,6 +37,7 @@ class Settings(BaseSettings):
     )
 
     telegram: TelegramSettings = TelegramSettings()
+    sqlite: SqliteSettings = SqliteSettings()
 
 
 settings = Settings()

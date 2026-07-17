@@ -11,13 +11,13 @@ learned the hard way.
 song as it plays. Each song is shown in a pink overlay box in the bottom-left of
 the video, formatted `Artist - Song - Country Year`
 (e.g. `Amir - Jai Cherché - France 2016`). The tool grabs one frame per minute,
-reads that box with OCR, appends each new song to a CSV, and (optionally)
-posts it to a Telegram channel with a country-flag emoji.
+reads that box with OCR, logs each new song to an SQLite database, and
+(optionally) posts it to a Telegram channel with a country-flag emoji.
 
-The pipeline lives in **`main.py`** (config-at-top); the Telegram side is
-split into small modules (`adapters/`, `core/`, `fixtures/`). It's a
-uv-managed Python project; deployment is **Docker Compose** (see README for
-the droplet cookbook).
+The pipeline lives in **`main.py`** (config-at-top); the Telegram and SQLite
+sides are split into small modules (`adapters/`, `services/`, `core/`,
+`fixtures/`). It's a uv-managed Python project; deployment is **Docker
+Compose** (see README for the droplet cookbook).
 
 ## Commands
 
@@ -35,8 +35,15 @@ the droplet cookbook).
   end before going live.
 - **Run the logger:** `python main.py` (local, Ctrl-C to stop) or
   `docker compose up -d` + `docker compose logs -f` (droplet). New songs land
-  in `songs.csv` — repo root locally, `./data/` under Docker (the container
+  in `songs.db` — repo root locally, `./data/` under Docker (the container
   runs from `/data`, bind-mounted to `./data`).
+- **Pull / push the database:** `scripts/pull-db.sh root@<droplet-ip>` copies
+  the droplet's `songs.db` to the repo root (integrity-checked; safe while
+  the logger runs) for local browsing, e.g. as a PyCharm SQLite data source.
+  `scripts/push-db.sh` overwrites the droplet DB with the local copy —
+  stops/starts the logger around the upload and keeps a `.bak-<stamp>` on the
+  droplet. Both accept the host as `$1` or via `ESC_DROPLET` (recipes in
+  README).
 - **Deps (uv):**
   `uv add "yt-dlp[default]" pytesseract pillow imagehash numpy pydantic-settings`.
   Keep yt-dlp on nightly: `uv add --prerelease allow "yt-dlp[default]"`.
@@ -55,13 +62,16 @@ the droplet cookbook).
 3. `imagehash.phash` change detection — only OCR when the box actually changes
    (`HASH_THRESHOLD`), so a 3-minute song is read once, not 3 times.
 4. `ocr()` — upscale 4×, grayscale, tesseract `--psm 7`, Latin script model.
-5. `parse()` → validate → dedup on `(artist, song)` → `append_csv()` with an ISO
-   timestamp.
-6. Telegram post (best-effort, AFTER the CSV append):
+5. `parse()` → validate → dedup on `(artist, song)` →
+   `SqliteService.add_entry_to_db()` with a UTC ISO timestamp (the
+   occurrences lookup for the Telegram stats line happens just before the
+   insert, so it describes previous plays only).
+6. Telegram post (best-effort, AFTER the DB insert):
    `services/telegram_service.py` formats `{flag} Artist — Song — Country
-   Year` (flags from `fixtures/country_mappings.py`) and sends it through
+   Year` plus a "Noticed X times before, last seen …" line (flags from
+   `fixtures/country_mappings.py`) and sends it through
    `adapters/telegram_client.py`. Any failure is a one-line `[warn]` —
-   Telegram must never break the loop; `songs.csv` stays the source of truth.
+   Telegram must never break the loop; `songs.db` stays the source of truth.
 
 ## Key files
 
@@ -71,14 +81,23 @@ the droplet cookbook).
   Plain text on purpose (no `parse_mode` → no escaping); best-effort — warns,
   never raises.
 - `services/telegram_service.py` — the Telegram glue `main.py` calls: message
-  formatting (flag + em-dashes), client construction from settings, and the
-  `--test-telegram` routine.
-- `core/settings.py` — pydantic-settings `Settings`: the Telegram knobs, from
-  env vars first, then `./.env`.
+  formatting (flag + em-dashes + the occurrences stats line), client
+  construction from settings, and the `--test-telegram` routine.
+- `adapters/sqlite_client.py` — stdlib-only (`sqlite3`) persistence client:
+  one long-lived connection, plain SQL. Deliberately NOT best-effort — the DB
+  is the source of truth, so failures raise instead of warning.
+- `services/sqlite_service.py` — the persistence glue `main.py` calls: UTC
+  timestamping on insert, and the occurrences lookup (count + last-seen
+  converted to `Europe/Berlin`) keyed on the `(country, year)` pair.
+- `scripts/pull-db.sh` / `scripts/push-db.sh` — copy `songs.db`
+  droplet↔Mac (SQLite has no server, so remote access = copying the file;
+  see the README cookbook).
+- `core/settings.py` — pydantic-settings `Settings`: the Telegram knobs and
+  the SQLite db path, from env vars first, then `./.env`.
 - `fixtures/country_mappings.py` — normalized country name → ISO alpha-2 →
   flag emoji (computed from regional indicators, no emoji literals); 🇪🇺
   fallback for unknown/OCR-mangled names and defunct states.
-- `.env` — Telegram secrets + `TZ` (**secret**, never commit — same rule as
+- `.env` — Telegram secrets (**secret**, never commit — same rule as
   `cookies.txt`). Lives at the repo root in both environments: locally
   `core/settings.py` reads it directly (optional); under Docker, compose
   forwards it into the container verbatim via `env_file:` and **requires it to
@@ -91,7 +110,8 @@ the droplet cookbook).
   (see gotchas), and sets `restart: unless-stopped`.
 - `README.md` — user-facing docs + the DigitalOcean operating cookbook
   (first-time setup, updating, cookie refresh, troubleshooting).
-- `songs.csv` — output: `timestamp, artist, song, country, year, raw_text`.
+- `songs.db` — output (SQLite): one `songs` table,
+  `id, timestamp (UTC ISO), artist, song, country, year, raw_text`.
 - `cookies.txt` — YouTube session cookies (**secret**, see gotchas). Never
   commit. Lives next to where the script runs: repo root locally,
   `data/cookies.txt` on the droplet.
@@ -100,8 +120,9 @@ the droplet cookbook).
   after `DEBUG_KEEP_HOURS`.
 - `pyproject.toml` / `uv.lock` / `.venv` — uv project.
 
-Make sure `.gitignore` covers `cookies.txt`, `.env`, `songs.csv`, `data/`,
-`debug_caps/`, and the calibration PNGs.
+Make sure `.gitignore` covers `cookies.txt`, `.env`, `songs.db*` (the glob
+also catches SQLite's transient `-journal` sidecar), `data/`, `debug_caps/`,
+and the calibration PNGs.
 
 ## Config knobs (top of the script)
 
@@ -125,11 +146,18 @@ Make sure `.gitignore` covers `cookies.txt`, `.env`, `songs.csv`, `data/`,
   `TELEGRAM__ENABLED`, `TELEGRAM__SILENT` (default on — ~20 songs/hour would
   ping subscribers constantly). Note the **double** underscore (see gotchas).
   Missing token/chat id ⇒ one startup `[warn]`, logger runs without posting.
-- **`TZ`** — also set in `.env`, but NOT a `core/settings.py` field (and never
-  should be): it's read by the C runtime under `datetime.now()`, and
-  pydantic-settings only parses `.env` into an object — it doesn't export to
-  the process environment. Unset ⇒ container timestamps in UTC; local runs
-  always use the system timezone.
+- **SQLite** db path likewise comes from env / `.env`: `SQLITE__DB_PATH`
+  (default `songs.db`; a relative path resolves against the working dir —
+  repo root locally, `/data` under Docker). Set-but-empty is fatal at startup
+  on purpose: sqlite3 treats `""` as a nameless temp DB that discards
+  everything on exit.
+- **No `TZ` knob — removed on purpose.** DB timestamps are stored in UTC by
+  `services/sqlite_service.py`, and the Telegram stats line converts to
+  CET/CEST via `ZoneInfo("Europe/Berlin")` — neither depends on the process
+  timezone. Only console log stamps and `debug_caps/` filenames use local time
+  (UTC inside the container, system tz on the Mac). If a C-runtime env var is
+  ever needed again, remember pydantic-settings does NOT export `.env` keys to
+  the process environment — only Docker's `env_file:` puts them there.
 
 ## Environments
 
@@ -226,7 +254,7 @@ check for this chain, like `--calibrate` is for the vision chain.
   Premium on the bot owner. Until then: standard Unicode flag emoji (they
   render everywhere except Windows desktop, which shows the two-letter code —
   acceptable).
-- Posting happens AFTER the CSV append and is best-effort: no retry queue, a
+- Posting happens AFTER the DB insert and is best-effort: no retry queue, a
   missed post is just a `[warn]` + `→ post failed` console tag. Rate limits
   are a non-issue (~1 post/3 min vs Telegram's ~1 msg/sec).
 
@@ -244,6 +272,6 @@ check for this chain, like `--calibrate` is for the vision chain.
 - **Fuzzy-match** OCR output against a known list of Eurovision entries to
   auto-correct rare misreads (would also fix flag lookups for OCR-mangled
   country names, which currently fall back to 🇪🇺).
-- Retry/queue for failed Telegram posts; backfilling posts from `songs.csv`.
-- Consider **SQLite** instead of CSV for easier querying.
-- Sync/ship `songs.csv` off the box periodically.
+- Retry/queue for failed Telegram posts; backfilling posts from `songs.db`.
+- Sync/ship `songs.db` off the box periodically (automated —
+  `scripts/pull-db.sh` covers the manual case).

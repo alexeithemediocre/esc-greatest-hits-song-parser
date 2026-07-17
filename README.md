@@ -1,9 +1,10 @@
 # esc-gh-parser
 
 Watches the **"Eurovision Song Contest: Non-Stop Hits!"** YouTube livestream,
-OCRs the pink song-title overlay once a minute, appends every new song to a
-CSV, and (optionally) posts it to a Telegram channel with a country-flag
-emoji. See `CLAUDE.md` for the full pipeline description and gotchas.
+OCRs the pink song-title overlay once a minute, logs every new song to an
+SQLite database, and (optionally) posts it to a Telegram channel with a
+country-flag emoji. See `CLAUDE.md` for the full pipeline description and
+gotchas.
 
 ## Cookies preparation
 
@@ -56,14 +57,14 @@ Put your exported YouTube cookies at `./data/cookies.txt` first (needed on
 datacenter IPs; harmless elsewhere), then:
 
 ```bash
-docker compose up -d          # run the logger; songs land in ./data/songs.csv
+docker compose up -d          # run the logger; songs land in ./data/songs.db
 docker compose logs -f        # watch it
 docker compose run --rm logger --calibrate   # the usual end-to-end check
 ```
 
-Timestamps default to UTC — set `TZ` in `.env` (e.g. `TZ=Europe/Berlin`, see
-`.env.sample`) if you want local time in the CSV, then apply it with
-`docker compose up -d`.
+Timestamps are stored in UTC on purpose (there is no `TZ` knob): the database
+keeps one canonical clock, and the Telegram stats line does its own CET/CEST
+conversion when displaying "last seen".
 
 ## DigitalOcean cookbook
 
@@ -186,13 +187,41 @@ docker compose logs -f             # live log (one line per minute)
 docker compose logs --since 1h     # recent history
 docker compose stop                # stop (graceful, same as Ctrl-C)
 docker compose up -d               # start again
-tail data/songs.csv                # what got logged
+sqlite3 -header -column data/songs.db \
+  'SELECT * FROM songs ORDER BY id DESC LIMIT 10'   # what got logged
+                                   # (needs a one-time `apt install sqlite3`)
 ```
 
-Fetch the results from your Mac:
+To fetch the results to your Mac, see
+[Browsing & restoring the database](#browsing--restoring-the-database).
+
+### Browsing & restoring the database
+
+SQLite is a single file with no server, so "remote access" means copying the
+file. Two helpers wrap that; both take the droplet address as their argument,
+or set `ESC_DROPLET=root@{IPv4 Droplet address}` once and omit it.
+
+**Pull — browse the droplet's data locally.** Copies `data/songs.db` to the
+repo root (gitignored there), verifies the copy (`PRAGMA integrity_check`),
+and prints the row count. Safe to run while the logger is up:
 
 ```bash
-scp root@{IPv4 Droplet address}:/root/esc-gh-parser/data/songs.csv .
+scripts/pull-db.sh root@{IPv4 Droplet address}
+```
+
+To browse it in PyCharm (Professional — Community lacks the database tools):
+**Database** tool window → **+** → **Data Source → SQLite**, point *File* at
+the pulled `songs.db`, let it download the driver. To refresh later, re-run
+the pull and refresh the data source — the file path stays the same.
+
+**Push — overwrite the droplet's DB with your local copy**, e.g. after fixing
+entries locally or restoring a backup. It stops the logger first (overwriting
+the file under its open connection would corrupt it), keeps the droplet's
+current DB as `data/songs.db.bak-<UTC stamp>`, uploads, and starts the logger
+again — asking for confirmation before touching anything:
+
+```bash
+scripts/push-db.sh root@{IPv4 Droplet address}
 ```
 
 ### Troubleshooting

@@ -6,7 +6,8 @@ FROM python:3.14-slim
 #   ffmpeg     - grabs one frame from the resolved stream URL
 #   tesseract  - OCR; the script-latn package is the Latin script model
 #                ("script/Latin", all European Latin diacritics in one model)
-#   tzdata     - so TZ= gives songs.csv local timestamps
+#   tzdata     - IANA zone db; ZoneInfo("Europe/Berlin") needs it to render
+#                the Telegram stats line in CET/CEST (timestamps are UTC)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         tesseract-ocr \
@@ -47,7 +48,7 @@ COPY services/ ./services/
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 
-# Run from /data (bind-mounted in compose) so songs.csv, the --calibrate PNGs
+# Run from /data (bind-mounted in compose) so songs.db, the --calibrate PNGs
 # and the relative ./cookies.txt path all resolve to the host, not the image.
 WORKDIR /data
 
